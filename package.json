@@ -1,0 +1,20 @@
+{
+  "name": "real-estate-crm",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "scripts": {
+    "postinstall": "npm install --prefix client --legacy-peer-deps && npm install --prefix server",
+    "build": "npm run client:build",
+    "client:build": "cd client && npm run build",
+    "start": "cd client && npm start",
+    "server": "cd server && npm start",
+    "dev": "concurrently \"npm run server\" \"npm run client:start\"",
+    "client:start": "cd client && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
