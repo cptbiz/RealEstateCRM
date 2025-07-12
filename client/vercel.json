@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "name": "real-estate-client",
+  "buildCommand": "CI=false npm run build",
+  "outputDirectory": "build",
+  "installCommand": "npm install --legacy-peer-deps",
+  "routes": [
+    {
+      "src": "/static/(.*)",
+      "headers": {
+        "cache-control": "s-maxage=31536000,immutable"
+      }
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ],
+  "env": {
+    "REACT_APP_BASE_URL": "@react_app_base_url"
+  }
+}

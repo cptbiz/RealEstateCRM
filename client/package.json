@@ -20,6 +20,7 @@
     "@reduxjs/toolkit": "^2.0.1",
     "@stripe/react-stripe-js": "^2.3.0",
     "@stripe/stripe-js": "^2.1.6",
+    "ajv": "^8.17.1",
     "apexcharts": "^3.41.1",
     "axios": "^1.4.0",
     "chakra-ui-autocomplete": "^1.4.5",
@@ -66,7 +67,8 @@
     "sitemap": "babel-node ./sitemap-builder.js"
   },
   "resolutions": {
-    "react-error-overlay": "6.0.9"
+    "react-error-overlay": "6.0.9",
+    "ajv": "^8.11.0"
   },
   "eslintConfig": {
     "extends": [
