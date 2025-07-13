@@ -1,52 +1,393 @@
 const express = require('express');
-const db = require('./db/config')
-const route = require('./controllers/route');
-const bodyParser = require('body-parser');
+const http = require('http');
+const socketIo = require('socket.io');
+const redis = require('redis');
+const session = require('express-session');
+const RedisStore = require('connect-redis')(session);
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const morgan = require('morgan');
+const winston = require('winston');
 const cors = require('cors');
+const bodyParser = require('body-parser');
+const cron = require('node-cron');
+const path = require('path');
+const fs = require('fs');
+
+// Internal imports
+const db = require('./db/config');
+const route = require('./controllers/route');
+const { i18nMiddleware } = require('./config/i18n');
 
 // Load environment variables
-require('dotenv').config()
+require('dotenv').config();
 
-const port = process.env.PORT || 5001
-const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:3000'
+// Constants
+const port = process.env.PORT || 5001;
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+const mongoUrl = process.env.DATABASE_URL || process.env.DB_URL || 'mongodb://127.0.0.1:27017';
+const dbName = process.env.DATABASE_NAME || process.env.DB || 'Prolink';
 
-const fs = require('fs');
-const path = require('path');
-
-//Setup Express App
+// Initialize Express app
 const app = express();
+const server = http.createServer(app);
 
-// Middleware
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// Initialize Socket.IO
+const io = socketIo(server, {
+    cors: {
+        origin: corsOrigin,
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
 
-// Set up CORS with proper configuration
+// Initialize Redis client
+const redisClient = redis.createClient({
+    url: redisUrl,
+    retry_strategy: (options) => {
+        if (options.error && options.error.code === 'ECONNREFUSED') {
+            console.error('Redis connection refused');
+        }
+        if (options.total_retry_time > 1000 * 60 * 60) {
+            console.error('Redis retry time exhausted');
+            return undefined;
+        }
+        if (options.attempt > 10) {
+            console.error('Redis max attempts reached');
+            return undefined;
+        }
+        return Math.min(options.attempt * 100, 3000);
+    }
+});
+
+// Redis connection handlers
+redisClient.on('connect', () => {
+    console.log('Redis connected successfully');
+});
+
+redisClient.on('error', (err) => {
+    console.error('Redis connection error:', err);
+});
+
+// Initialize logger
+const logger = winston.createLogger({
+    level: process.env.LOG_LEVEL || 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.errors({ stack: true }),
+        winston.format.json()
+    ),
+    defaultMeta: { service: 'real-estate-crm' },
+    transports: [
+        new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+        new winston.transports.File({ filename: 'logs/combined.log' }),
+        new winston.transports.Console({
+            format: winston.format.simple()
+        })
+    ]
+});
+
+// Ensure logs directory exists
+if (!fs.existsSync('logs')) {
+    fs.mkdirSync('logs');
+}
+
+// Security middleware
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https:"],
+            scriptSrc: ["'self'", "https:"],
+            imgSrc: ["'self'", "data:", "https:"],
+            connectSrc: ["'self'", "https:"],
+            fontSrc: ["'self'", "https:", "data:"],
+            objectSrc: ["'none'"],
+            mediaSrc: ["'self'"],
+            frameSrc: ["'self'"]
+        }
+    }
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // limit each IP to 100 requests per windowMs
+    message: 'Too many requests from this IP, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => {
+        // Skip rate limiting for health checks
+        return req.path === '/api/health' || req.path === '/api/status';
+    }
+});
+
+app.use(limiter);
+
+// API-specific rate limiting
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 500,
+    message: 'Too many API requests, please try again later.'
+});
+
+app.use('/api/', apiLimiter);
+
+// Compression middleware
+app.use(compression());
+
+// Request logging
+app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
+
+// Body parsing middleware
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
+
+// Session configuration
+app.use(session({
+    store: new RedisStore({ client: redisClient }),
+    secret: process.env.SESSION_SECRET || 'your-secret-key',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: process.env.NODE_ENV === 'production',
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    },
+    name: 'sessionId'
+}));
+
+// CORS configuration
 app.use(cors({
-  origin: corsOrigin,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}))
-//API Routes
+    origin: corsOrigin,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept-Language', 'X-Requested-With']
+}));
+
+// Internationalization middleware
+app.use(i18nMiddleware);
+
+// Request ID middleware for tracing
+app.use((req, res, next) => {
+    req.id = require('crypto').randomUUID();
+    res.setHeader('X-Request-ID', req.id);
+    next();
+});
+
+// Request logging middleware
+app.use((req, res, next) => {
+    logger.info(`${req.method} ${req.url}`, {
+        requestId: req.id,
+        ip: req.ip,
+        userAgent: req.get('User-Agent'),
+        language: req.language
+    });
+    next();
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.status(200).json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        version: process.env.APP_VERSION || '1.0.0',
+        environment: process.env.NODE_ENV || 'development'
+    });
+});
+
+// Status endpoint with system information
+app.get('/api/status', async (req, res) => {
+    try {
+        const status = {
+            server: 'running',
+            database: 'connected',
+            redis: redisClient.connected ? 'connected' : 'disconnected',
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            timestamp: new Date().toISOString()
+        };
+        
+        res.status(200).json(status);
+    } catch (error) {
+        logger.error('Status check failed:', error);
+        res.status(500).json({
+            status: 'error',
+            message: 'Status check failed'
+        });
+    }
+});
+
+// API Routes
 app.use('/api', route);
 
-
-app.get('/', async (req, res) => {
-    res.send('Welcome to my world...')
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+    logger.info(`Client connected: ${socket.id}`);
+    
+    // Join user to their room for personal notifications
+    socket.on('join-user-room', (userId) => {
+        socket.join(`user-${userId}`);
+        logger.info(`User ${userId} joined their room`);
+    });
+    
+    // Handle property views in real-time
+    socket.on('property-view', (data) => {
+        socket.to(`property-${data.propertyId}`).emit('property-view-update', {
+            propertyId: data.propertyId,
+            viewCount: data.viewCount,
+            timestamp: new Date().toISOString()
+        });
+    });
+    
+    // Handle chat messages
+    socket.on('chat-message', (data) => {
+        socket.to(`chat-${data.chatId}`).emit('new-message', {
+            message: data.message,
+            sender: data.sender,
+            timestamp: new Date().toISOString()
+        });
+    });
+    
+    // Handle property inquiries
+    socket.on('property-inquiry', (data) => {
+        socket.to(`agent-${data.agentId}`).emit('new-inquiry', {
+            propertyId: data.propertyId,
+            buyerId: data.buyerId,
+            message: data.message,
+            timestamp: new Date().toISOString()
+        });
+    });
+    
+    // Handle disconnection
+    socket.on('disconnect', () => {
+        logger.info(`Client disconnected: ${socket.id}`);
+    });
 });
 
-// Get port from environment and store in Express.
-
-const server = app.listen(port, () => {
-    const protocol = (process.env.HTTPS === true || process.env.NODE_ENV === 'production') ? 'https' : 'http';
-    const { address, port } = server.address();
-    const host = address === '::' ? '127.0.0.1' : address;
-    console.log(`Server listening at ${protocol}://${host}:${port}/`);
+// Error handling middleware
+app.use((err, req, res, next) => {
+    logger.error('Unhandled error:', {
+        requestId: req.id,
+        error: err.message,
+        stack: err.stack,
+        url: req.url,
+        method: req.method
+    });
+    
+    res.status(err.status || 500).json({
+        error: {
+            message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+            requestId: req.id,
+            timestamp: new Date().toISOString()
+        }
+    });
 });
 
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({
+        error: {
+            message: 'Route not found',
+            requestId: req.id,
+            timestamp: new Date().toISOString()
+        }
+    });
+});
+
+// Scheduled tasks
+cron.schedule('0 0 * * *', async () => {
+    // Daily cleanup tasks
+    logger.info('Running daily cleanup tasks');
+    
+    try {
+        // Clean up expired reservations
+        const Property = require('./model/schema/property');
+        await Property.updateMany(
+            {
+                status: 'reserved',
+                'reservationDetails.reservationExpiry': { $lt: new Date() }
+            },
+            {
+                $set: { status: 'available' },
+                $unset: { reservationDetails: 1 }
+            }
+        );
+        
+        // Clean up old logs (keep last 30 days)
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        const AiInteraction = require('./model/schema/aiInteraction');
+        await AiInteraction.deleteMany({ createdAt: { $lt: thirtyDaysAgo } });
+        
+        const IntegrationLog = require('./model/schema/integrationLog');
+        await IntegrationLog.deleteMany({ createdAt: { $lt: thirtyDaysAgo } });
+        
+        logger.info('Daily cleanup completed');
+    } catch (error) {
+        logger.error('Daily cleanup failed:', error);
+    }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    logger.info('SIGTERM received, shutting down gracefully');
+    
+    server.close(() => {
+        logger.info('HTTP server closed');
+        
+        redisClient.quit(() => {
+            logger.info('Redis client closed');
+            process.exit(0);
+        });
+    });
+});
+
+process.on('SIGINT', () => {
+    logger.info('SIGINT received, shutting down gracefully');
+    
+    server.close(() => {
+        logger.info('HTTP server closed');
+        
+        redisClient.quit(() => {
+            logger.info('Redis client closed');
+            process.exit(0);
+        });
+    });
+});
+
+// Unhandled promise rejection handler
+process.on('unhandledRejection', (reason, promise) => {
+    logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Uncaught exception handler
+process.on('uncaughtException', (error) => {
+    logger.error('Uncaught Exception:', error);
+    process.exit(1);
+});
+
+// Start server
+server.listen(port, () => {
+    const protocol = (process.env.HTTPS === 'true' || process.env.NODE_ENV === 'production') ? 'https' : 'http';
+    const host = process.env.HOST || '127.0.0.1';
+    
+    logger.info(`Server started successfully`, {
+        url: `${protocol}://${host}:${port}`,
+        environment: process.env.NODE_ENV || 'development',
+        timestamp: new Date().toISOString()
+    });
+    
+    console.log(`🚀 Server listening at ${protocol}://${host}:${port}/`);
+    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌐 CORS Origin: ${corsOrigin}`);
+    console.log(`💾 Database: ${dbName}`);
+    console.log(`🔴 Redis: ${redisUrl}`);
+});
 
 // Connect to MongoDB
-const DATABASE_URL = process.env.DATABASE_URL || process.env.DB_URL || 'mongodb://127.0.0.1:27017'
-const DATABASE = process.env.DATABASE_NAME || process.env.DB || 'Prolink'
+db(mongoUrl, dbName);
 
-db(DATABASE_URL, DATABASE);
+// Export for testing
+module.exports = { app, server, io, redisClient };
