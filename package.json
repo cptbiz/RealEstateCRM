@@ -1,7 +1,7 @@
 {
   "name": "real-estate-crm",
   "version": "1.0.0",
-  "description": "Real Estate CRM application with React frontend and Node.js backend",
+  "description": "Multilingual Real Estate CRM application with AI integration",
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
@@ -13,28 +13,54 @@
     "install:server": "cd server && npm install",
     "install:client": "cd client && npm install --legacy-peer-deps",
     "build": "npm run client:build",
+    "build:server": "cd server && npm run build || echo 'No server build needed'",
     "setup": "npm run install:all && npm run build",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "npm run test:server && npm run test:client",
+    "test:server": "cd server && npm test",
+    "test:client": "cd client && npm test -- --watchAll=false",
+    "lint": "npm run lint:server && npm run lint:client",
+    "lint:server": "cd server && npm run lint || echo 'No server linting configured'",
+    "lint:client": "cd client && npm run lint || echo 'No client linting configured'",
+    "start": "npm run server:start",
+    "heroku-postbuild": "npm run install:all && npm run build",
+    "railway:build": "npm run install:server && npm run build:server",
+    "vercel:build": "npm run install:client && npm run client:build"
   },
   "keywords": [
     "real-estate",
     "crm",
+    "multilingual",
+    "ai",
     "react",
     "nodejs",
     "express",
-    "mongodb"
+    "mongodb",
+    "redis",
+    "socket.io",
+    "openai",
+    "google-translate",
+    "whatsapp",
+    "telegram"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Real Estate CRM Team",
+  "license": "MIT",
   "devDependencies": {
     "concurrently": "^7.6.0"
   },
   "engines": {
-    "node": ">=14.0.0",
-    "npm": ">=6.0.0"
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   },
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/yourusername/real-estate-crm.git"
+  },
+  "homepage": "https://github.com/yourusername/real-estate-crm#readme",
+  "bugs": {
+    "url": "https://github.com/yourusername/real-estate-crm/issues"
+  },
+  "directories": {
+    "server": "./server",
+    "client": "./client"
   }
 }

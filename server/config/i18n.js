@@ -98,21 +98,7 @@ const i18nConfig = {
     },
     
     // Postprocessing
-    postProcess: ['interval', 'plural'],
-    
-    // Resources (can be loaded dynamically)
-    resources: {
-        en: {
-            common: require('../locales/en/common.json'),
-            errors: require('../locales/en/errors.json'),
-            validation: require('../locales/en/validation.json'),
-            properties: require('../locales/en/properties.json'),
-            projects: require('../locales/en/projects.json'),
-            users: require('../locales/en/users.json'),
-            ai: require('../locales/en/ai.json'),
-            integrations: require('../locales/en/integrations.json')
-        }
-    }
+    postProcess: ['interval', 'plural']
 };
 
 // Initialize i18next

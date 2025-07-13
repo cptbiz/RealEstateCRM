@@ -1,32 +1,91 @@
 const OpenAI = require('openai');
-const { Translate } = require('@google-cloud/translate').v2;
 const winston = require('winston');
-const AiInteraction = require('../model/schema/aiInteraction');
-const IntegrationLog = require('../model/schema/integrationLog');
-const Property = require('../model/schema/property');
-const Project = require('../model/schema/project');
-const User = require('../model/schema/user');
-const { i18nHelpers } = require('../config/i18n');
+
+// Safe imports with error handling
+let Translate, AiInteraction, IntegrationLog, Property, Project, User, i18nHelpers;
+
+try {
+    const { Translate: GoogleTranslate } = require('@google-cloud/translate').v2;
+    Translate = GoogleTranslate;
+} catch (error) {
+    console.warn('Google Translate not available:', error.message);
+}
+
+try {
+    AiInteraction = require('../model/schema/aiInteraction');
+} catch (error) {
+    console.warn('AiInteraction model not available:', error.message);
+}
+
+try {
+    IntegrationLog = require('../model/schema/integrationLog');
+} catch (error) {
+    console.warn('IntegrationLog model not available:', error.message);
+}
+
+try {
+    Property = require('../model/schema/property');
+} catch (error) {
+    console.warn('Property model not available:', error.message);
+}
+
+try {
+    Project = require('../model/schema/project');
+} catch (error) {
+    console.warn('Project model not available:', error.message);
+}
+
+try {
+    User = require('../model/schema/user');
+} catch (error) {
+    console.warn('User model not available:', error.message);
+}
+
+try {
+    const i18nConfig = require('../config/i18n');
+    i18nHelpers = i18nConfig.i18nHelpers;
+} catch (error) {
+    console.warn('i18n helpers not available:', error.message);
+}
 
 // Initialize services
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
+let openai, translate;
 
-const translate = new Translate({
-    keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-    projectId: process.env.GOOGLE_PROJECT_ID
-});
+try {
+    if (process.env.OPENAI_API_KEY) {
+        openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY
+        });
+    }
+} catch (error) {
+    console.warn('OpenAI not available:', error.message);
+}
+
+try {
+    if (Translate && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        translate = new Translate({
+            keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+            projectId: process.env.GOOGLE_PROJECT_ID
+        });
+    }
+} catch (error) {
+    console.warn('Google Translate not available:', error.message);
+}
 
 // Logger setup
 const logger = winston.createLogger({
     level: 'info',
     format: winston.format.json(),
     transports: [
-        new winston.transports.File({ filename: 'logs/ai-service.log' }),
         new winston.transports.Console()
     ]
 });
+
+// Add file logging if logs directory exists
+const fs = require('fs');
+if (fs.existsSync('logs')) {
+    logger.add(new winston.transports.File({ filename: 'logs/ai-service.log' }));
+}
 
 class AIService {
     constructor() {
@@ -41,18 +100,31 @@ class AIService {
         
         this.supportedLanguages = ['en', 'pt-BR', 'es', 'ru'];
         this.defaultLanguage = 'en';
+        this.isEnabled = !!openai;
     }
 
     // ==================== CHATBOT SERVICE ====================
     async chatbot(query, userId, language = 'en', context = {}) {
+        if (!this.isEnabled || !openai) {
+            return {
+                success: false,
+                error: 'AI service not available',
+                fallbackResponse: 'Извините, сервис ИИ временно недоступен. Пожалуйста, свяжитесь с поддержкой.'
+            };
+        }
+
         const sessionId = context.sessionId || `session-${userId}-${Date.now()}`;
         const startTime = Date.now();
         
         try {
-            // Get user context
-            const user = await User.findById(userId);
-            if (!user) {
-                throw new Error('User not found');
+            // Get user context if User model is available
+            let user = null;
+            if (User) {
+                try {
+                    user = await User.findById(userId);
+                } catch (error) {
+                    logger.warn('Could not fetch user:', error.message);
+                }
             }
 
             // Build system prompt based on user role and language
@@ -74,28 +146,34 @@ class AIService {
             const aiResponse = response.choices[0].message.content;
             const processingTime = Date.now() - startTime;
 
-            // Log interaction
-            await this.logInteraction({
-                userId,
-                sessionId,
-                interactionType: 'chatbot',
-                input: { query, language, context },
-                modelInfo: {
-                    modelName: this.models.chatbot,
-                    provider: 'openai',
-                    temperature: 0.7,
-                    maxTokens: 1500
-                },
-                response: {
-                    content: aiResponse,
-                    processingTime,
-                    tokenUsage: {
-                        promptTokens: response.usage.prompt_tokens,
-                        completionTokens: response.usage.completion_tokens,
-                        totalTokens: response.usage.total_tokens
-                    }
+            // Log interaction if available
+            if (AiInteraction) {
+                try {
+                    await this.logInteraction({
+                        userId,
+                        sessionId,
+                        interactionType: 'chatbot',
+                        input: { query, language, context },
+                        modelInfo: {
+                            modelName: this.models.chatbot,
+                            provider: 'openai',
+                            temperature: 0.7,
+                            maxTokens: 1500
+                        },
+                        response: {
+                            content: aiResponse,
+                            processingTime,
+                            tokenUsage: {
+                                promptTokens: response.usage.prompt_tokens,
+                                completionTokens: response.usage.completion_tokens,
+                                totalTokens: response.usage.total_tokens
+                            }
+                        }
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log AI interaction:', logError.message);
                 }
-            });
+            }
 
             return {
                 success: true,
@@ -108,34 +186,59 @@ class AIService {
         } catch (error) {
             logger.error('Chatbot error:', error);
             
-            await this.logInteraction({
-                userId,
-                sessionId,
-                interactionType: 'chatbot',
-                input: { query, language, context },
-                error: {
-                    occurred: true,
-                    message: error.message,
-                    stack: error.stack
+            if (AiInteraction) {
+                try {
+                    await this.logInteraction({
+                        userId,
+                        sessionId,
+                        interactionType: 'chatbot',
+                        input: { query, language, context },
+                        error: {
+                            occurred: true,
+                            message: error.message,
+                            stack: error.stack
+                        }
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log AI error:', logError.message);
                 }
-            });
+            }
 
             return {
                 success: false,
                 error: error.message,
-                processingTime: Date.now() - startTime
+                processingTime: Date.now() - startTime,
+                fallbackResponse: this.getFallbackResponse(language)
             };
         }
     }
 
     // ==================== PROPERTY RECOMMENDATIONS ====================
     async generatePropertyRecommendations(userId, preferences = {}, language = 'en') {
+        if (!this.isEnabled || !openai || !Property) {
+            return {
+                success: false,
+                error: 'AI service or Property model not available'
+            };
+        }
+
         const startTime = Date.now();
         
         try {
-            const user = await User.findById(userId);
+            let user = null;
+            if (User) {
+                try {
+                    user = await User.findById(userId);
+                } catch (error) {
+                    logger.warn('Could not fetch user for recommendations:', error.message);
+                }
+            }
+
             if (!user) {
-                throw new Error('User not found');
+                return {
+                    success: false,
+                    error: 'User not found'
+                };
             }
 
             // Get user preferences
@@ -173,19 +276,25 @@ class AIService {
             const processingTime = Date.now() - startTime;
 
             // Log interaction
-            await this.logInteraction({
-                userId,
-                sessionId: `recommendation-${userId}-${Date.now()}`,
-                interactionType: 'recommendation',
-                input: { preferences: userPreferences, language },
-                response: {
-                    content: JSON.stringify(recommendations),
-                    processingTime,
-                    tokenUsage: {
-                        totalTokens: response.usage.total_tokens
-                    }
+            if (AiInteraction) {
+                try {
+                    await this.logInteraction({
+                        userId,
+                        sessionId: `recommendation-${userId}-${Date.now()}`,
+                        interactionType: 'recommendation',
+                        input: { preferences: userPreferences, language },
+                        response: {
+                            content: JSON.stringify(recommendations),
+                            processingTime,
+                            tokenUsage: {
+                                totalTokens: response.usage.total_tokens
+                            }
+                        }
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log recommendation interaction:', logError.message);
                 }
-            });
+            }
 
             return {
                 success: true,
@@ -207,6 +316,13 @@ class AIService {
 
     // ==================== PRICE PREDICTION ====================
     async predictPropertyPrice(propertyData, marketData = {}, language = 'en') {
+        if (!this.isEnabled || !openai) {
+            return {
+                success: false,
+                error: 'AI service not available'
+            };
+        }
+
         const startTime = Date.now();
         
         try {
@@ -230,19 +346,25 @@ class AIService {
             const processingTime = Date.now() - startTime;
 
             // Log interaction
-            await this.logInteraction({
-                userId: propertyData.userId || null,
-                sessionId: `price-prediction-${Date.now()}`,
-                interactionType: 'price_prediction',
-                input: { propertyData, marketData, language },
-                response: {
-                    content: JSON.stringify(prediction),
-                    processingTime,
-                    tokenUsage: {
-                        totalTokens: response.usage.total_tokens
-                    }
+            if (AiInteraction) {
+                try {
+                    await this.logInteraction({
+                        userId: propertyData.userId || null,
+                        sessionId: `price-prediction-${Date.now()}`,
+                        interactionType: 'price_prediction',
+                        input: { propertyData, marketData, language },
+                        response: {
+                            content: JSON.stringify(prediction),
+                            processingTime,
+                            tokenUsage: {
+                                totalTokens: response.usage.total_tokens
+                            }
+                        }
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log price prediction interaction:', logError.message);
                 }
-            });
+            }
 
             return {
                 success: true,
@@ -264,6 +386,13 @@ class AIService {
 
     // ==================== MARKET ANALYSIS ====================
     async generateMarketAnalysis(location, propertyType, timeframe = '6months', language = 'en') {
+        if (!this.isEnabled || !openai) {
+            return {
+                success: false,
+                error: 'AI service not available'
+            };
+        }
+
         const startTime = Date.now();
         
         try {
@@ -287,19 +416,25 @@ class AIService {
             const processingTime = Date.now() - startTime;
 
             // Log interaction
-            await this.logInteraction({
-                userId: null,
-                sessionId: `market-analysis-${Date.now()}`,
-                interactionType: 'market_analysis',
-                input: { location, propertyType, timeframe, language },
-                response: {
-                    content: JSON.stringify(analysis),
-                    processingTime,
-                    tokenUsage: {
-                        totalTokens: response.usage.total_tokens
-                    }
+            if (AiInteraction) {
+                try {
+                    await this.logInteraction({
+                        userId: null,
+                        sessionId: `market-analysis-${Date.now()}`,
+                        interactionType: 'market_analysis',
+                        input: { location, propertyType, timeframe, language },
+                        response: {
+                            content: JSON.stringify(analysis),
+                            processingTime,
+                            tokenUsage: {
+                                totalTokens: response.usage.total_tokens
+                            }
+                        }
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log market analysis interaction:', logError.message);
                 }
-            });
+            }
 
             return {
                 success: true,
@@ -321,6 +456,13 @@ class AIService {
 
     // ==================== TRANSLATION SERVICE ====================
     async translateText(text, targetLanguage, sourceLanguage = 'auto') {
+        if (!translate) {
+            return {
+                success: false,
+                error: 'Translation service not available'
+            };
+        }
+
         const startTime = Date.now();
         
         try {
@@ -332,13 +474,19 @@ class AIService {
             const processingTime = Date.now() - startTime;
 
             // Log integration
-            await this.logIntegration({
-                service: 'google_translate',
-                action: 'translate_text',
-                request: { text, targetLanguage, sourceLanguage },
-                response: { translation, processingTime },
-                status: 'success'
-            });
+            if (IntegrationLog) {
+                try {
+                    await this.logIntegration({
+                        service: 'google_translate',
+                        action: 'translate_text',
+                        request: { text, targetLanguage, sourceLanguage },
+                        response: { translation, processingTime },
+                        status: 'success'
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log translation:', logError.message);
+                }
+            }
 
             return {
                 success: true,
@@ -351,13 +499,19 @@ class AIService {
         } catch (error) {
             logger.error('Translation error:', error);
             
-            await this.logIntegration({
-                service: 'google_translate',
-                action: 'translate_text',
-                request: { text, targetLanguage, sourceLanguage },
-                error: error.message,
-                status: 'error'
-            });
+            if (IntegrationLog) {
+                try {
+                    await this.logIntegration({
+                        service: 'google_translate',
+                        action: 'translate_text',
+                        request: { text, targetLanguage, sourceLanguage },
+                        error: error.message,
+                        status: 'error'
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log translation error:', logError.message);
+                }
+            }
 
             return {
                 success: false,
@@ -369,6 +523,13 @@ class AIService {
 
     // ==================== IMAGE ANALYSIS ====================
     async analyzePropertyImage(imageUrl, analysisType = 'general', language = 'en') {
+        if (!this.isEnabled || !openai) {
+            return {
+                success: false,
+                error: 'AI service not available'
+            };
+        }
+
         const startTime = Date.now();
         
         try {
@@ -393,19 +554,25 @@ class AIService {
             const processingTime = Date.now() - startTime;
 
             // Log interaction
-            await this.logInteraction({
-                userId: null,
-                sessionId: `image-analysis-${Date.now()}`,
-                interactionType: 'image_analysis',
-                input: { imageUrl, analysisType, language },
-                response: {
-                    content: JSON.stringify(analysis),
-                    processingTime,
-                    tokenUsage: {
-                        totalTokens: response.usage.total_tokens
-                    }
+            if (AiInteraction) {
+                try {
+                    await this.logInteraction({
+                        userId: null,
+                        sessionId: `image-analysis-${Date.now()}`,
+                        interactionType: 'image_analysis',
+                        input: { imageUrl, analysisType, language },
+                        response: {
+                            content: JSON.stringify(analysis),
+                            processingTime,
+                            tokenUsage: {
+                                totalTokens: response.usage.total_tokens
+                            }
+                        }
+                    });
+                } catch (logError) {
+                    logger.warn('Could not log image analysis interaction:', logError.message);
                 }
-            });
+            }
 
             return {
                 success: true,
@@ -435,7 +602,7 @@ class AIService {
             'ADMIN': 'You are an AI assistant for system administrators. Help with platform management and analytics.'
         };
 
-        const basePrompt = rolePrompts[user.role] || rolePrompts['BUYER'];
+        const basePrompt = user ? (rolePrompts[user.role] || rolePrompts['BUYER']) : rolePrompts['BUYER'];
         const languagePrompt = language !== 'en' ? ` Always respond in ${language}.` : '';
         
         return `${basePrompt} You have access to comprehensive real estate data and can provide personalized recommendations.${languagePrompt}`;
@@ -518,6 +685,8 @@ class AIService {
     }
 
     async findSimilarProperties(propertyData) {
+        if (!Property) return [];
+
         const query = {
             isActive: true,
             status: 'sold',
@@ -537,6 +706,8 @@ class AIService {
     }
 
     async getMarketData(location, propertyType, timeframe) {
+        if (!Property) return [];
+
         const timeframeMap = {
             '3months': 3,
             '6months': 6,
@@ -618,6 +789,8 @@ class AIService {
     }
 
     async logInteraction(interactionData) {
+        if (!AiInteraction) return;
+        
         try {
             const aiInteraction = new AiInteraction(interactionData);
             await aiInteraction.save();
@@ -627,6 +800,8 @@ class AIService {
     }
 
     async logIntegration(integrationData) {
+        if (!IntegrationLog) return;
+        
         try {
             const integrationLog = new IntegrationLog({
                 userId: integrationData.userId || null,
@@ -654,6 +829,17 @@ class AIService {
         } catch (error) {
             logger.error('Error logging integration:', error);
         }
+    }
+
+    getFallbackResponse(language) {
+        const fallbacks = {
+            'en': 'I apologize, but I\'m currently unable to process your request. Please contact our support team for assistance.',
+            'pt-BR': 'Peço desculpas, mas não consigo processar sua solicitação no momento. Entre em contato com nossa equipe de suporte.',
+            'es': 'Me disculpo, pero actualmente no puedo procesar su solicitud. Por favor contacte a nuestro equipo de soporte.',
+            'ru': 'Извините, но я не могу обработать ваш запрос в данный момент. Пожалуйста, свяжитесь с нашей службой поддержки.'
+        };
+        
+        return fallbacks[language] || fallbacks['en'];
     }
 }
 

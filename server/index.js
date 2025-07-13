@@ -3,7 +3,6 @@ const http = require('http');
 const socketIo = require('socket.io');
 const redis = require('redis');
 const session = require('express-session');
-const RedisStore = require('connect-redis')(session);
 const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
@@ -18,7 +17,6 @@ const fs = require('fs');
 // Internal imports
 const db = require('./db/config');
 const route = require('./controllers/route');
-const { i18nMiddleware } = require('./config/i18n');
 
 // Load environment variables
 require('dotenv').config();
@@ -44,32 +42,47 @@ const io = socketIo(server, {
 });
 
 // Initialize Redis client
-const redisClient = redis.createClient({
-    url: redisUrl,
-    retry_strategy: (options) => {
-        if (options.error && options.error.code === 'ECONNREFUSED') {
-            console.error('Redis connection refused');
+let redisClient;
+let RedisStore;
+
+try {
+    redisClient = redis.createClient({
+        url: redisUrl,
+        retry_strategy: (options) => {
+            if (options.error && options.error.code === 'ECONNREFUSED') {
+                console.error('Redis connection refused');
+            }
+            if (options.total_retry_time > 1000 * 60 * 60) {
+                console.error('Redis retry time exhausted');
+                return undefined;
+            }
+            if (options.attempt > 10) {
+                console.error('Redis max attempts reached');
+                return undefined;
+            }
+            return Math.min(options.attempt * 100, 3000);
         }
-        if (options.total_retry_time > 1000 * 60 * 60) {
-            console.error('Redis retry time exhausted');
-            return undefined;
-        }
-        if (options.attempt > 10) {
-            console.error('Redis max attempts reached');
-            return undefined;
-        }
-        return Math.min(options.attempt * 100, 3000);
+    });
+
+    // Redis connection handlers
+    redisClient.on('connect', () => {
+        console.log('Redis connected successfully');
+    });
+
+    redisClient.on('error', (err) => {
+        console.error('Redis connection error:', err);
+    });
+
+    // Initialize RedisStore only if Redis is available
+    try {
+        const ConnectRedis = require('connect-redis');
+        RedisStore = ConnectRedis(session);
+    } catch (error) {
+        console.warn('Redis session store not available, using memory store');
     }
-});
-
-// Redis connection handlers
-redisClient.on('connect', () => {
-    console.log('Redis connected successfully');
-});
-
-redisClient.on('error', (err) => {
-    console.error('Redis connection error:', err);
-});
+} catch (error) {
+    console.warn('Redis not available, continuing without Redis');
+}
 
 // Initialize logger
 const logger = winston.createLogger({
@@ -81,8 +94,6 @@ const logger = winston.createLogger({
     ),
     defaultMeta: { service: 'real-estate-crm' },
     transports: [
-        new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-        new winston.transports.File({ filename: 'logs/combined.log' }),
         new winston.transports.Console({
             format: winston.format.simple()
         })
@@ -92,6 +103,12 @@ const logger = winston.createLogger({
 // Ensure logs directory exists
 if (!fs.existsSync('logs')) {
     fs.mkdirSync('logs');
+}
+
+// Add file logging if in development or logs directory exists
+if (process.env.NODE_ENV === 'development' || fs.existsSync('logs')) {
+    logger.add(new winston.transports.File({ filename: 'logs/error.log', level: 'error' }));
+    logger.add(new winston.transports.File({ filename: 'logs/combined.log' }));
 }
 
 // Security middleware
@@ -146,8 +163,7 @@ app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
 // Session configuration
-app.use(session({
-    store: new RedisStore({ client: redisClient }),
+const sessionConfig = {
     secret: process.env.SESSION_SECRET || 'your-secret-key',
     resave: false,
     saveUninitialized: false,
@@ -157,7 +173,14 @@ app.use(session({
         maxAge: 24 * 60 * 60 * 1000 // 24 hours
     },
     name: 'sessionId'
-}));
+};
+
+// Use Redis store if available
+if (RedisStore && redisClient) {
+    sessionConfig.store = new RedisStore({ client: redisClient });
+}
+
+app.use(session(sessionConfig));
 
 // CORS configuration
 app.use(cors({
@@ -167,8 +190,13 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept-Language', 'X-Requested-With']
 }));
 
-// Internationalization middleware
-app.use(i18nMiddleware);
+// Internationalization middleware - load dynamically
+try {
+    const { i18nMiddleware } = require('./config/i18n');
+    app.use(i18nMiddleware);
+} catch (error) {
+    console.warn('i18n middleware not available:', error.message);
+}
 
 // Request ID middleware for tracing
 app.use((req, res, next) => {
@@ -204,7 +232,7 @@ app.get('/api/status', async (req, res) => {
         const status = {
             server: 'running',
             database: 'connected',
-            redis: redisClient.connected ? 'connected' : 'disconnected',
+            redis: redisClient && redisClient.isOpen ? 'connected' : 'disconnected',
             uptime: process.uptime(),
             memory: process.memoryUsage(),
             timestamp: new Date().toISOString()
@@ -218,6 +246,15 @@ app.get('/api/status', async (req, res) => {
             message: 'Status check failed'
         });
     }
+});
+
+// Default route
+app.get('/', (req, res) => {
+    res.json({
+        message: 'Multilingual Real Estate CRM API',
+        version: '1.0.0',
+        timestamp: new Date().toISOString()
+    });
 });
 
 // API Routes
@@ -297,38 +334,44 @@ app.use((req, res) => {
     });
 });
 
-// Scheduled tasks
-cron.schedule('0 0 * * *', async () => {
-    // Daily cleanup tasks
-    logger.info('Running daily cleanup tasks');
-    
-    try {
-        // Clean up expired reservations
-        const Property = require('./model/schema/property');
-        await Property.updateMany(
-            {
-                status: 'reserved',
-                'reservationDetails.reservationExpiry': { $lt: new Date() }
-            },
-            {
-                $set: { status: 'available' },
-                $unset: { reservationDetails: 1 }
+// Scheduled tasks (only if not in serverless environment)
+if (process.env.NODE_ENV !== 'production' || !process.env.RAILWAY_DEPLOYMENT) {
+    cron.schedule('0 0 * * *', async () => {
+        // Daily cleanup tasks
+        logger.info('Running daily cleanup tasks');
+        
+        try {
+            // Clean up expired reservations
+            const Property = require('./model/schema/property');
+            await Property.updateMany(
+                {
+                    status: 'reserved',
+                    'reservationDetails.reservationExpiry': { $lt: new Date() }
+                },
+                {
+                    $set: { status: 'available' },
+                    $unset: { reservationDetails: 1 }
+                }
+            );
+            
+            // Clean up old logs (keep last 30 days)
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+            try {
+                const AiInteraction = require('./model/schema/aiInteraction');
+                await AiInteraction.deleteMany({ createdAt: { $lt: thirtyDaysAgo } });
+                
+                const IntegrationLog = require('./model/schema/integrationLog');
+                await IntegrationLog.deleteMany({ createdAt: { $lt: thirtyDaysAgo } });
+            } catch (cleanupError) {
+                logger.warn('Cleanup of AI logs failed:', cleanupError.message);
             }
-        );
-        
-        // Clean up old logs (keep last 30 days)
-        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        const AiInteraction = require('./model/schema/aiInteraction');
-        await AiInteraction.deleteMany({ createdAt: { $lt: thirtyDaysAgo } });
-        
-        const IntegrationLog = require('./model/schema/integrationLog');
-        await IntegrationLog.deleteMany({ createdAt: { $lt: thirtyDaysAgo } });
-        
-        logger.info('Daily cleanup completed');
-    } catch (error) {
-        logger.error('Daily cleanup failed:', error);
-    }
-});
+            
+            logger.info('Daily cleanup completed');
+        } catch (error) {
+            logger.error('Daily cleanup failed:', error);
+        }
+    });
+}
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
@@ -337,10 +380,14 @@ process.on('SIGTERM', () => {
     server.close(() => {
         logger.info('HTTP server closed');
         
-        redisClient.quit(() => {
-            logger.info('Redis client closed');
+        if (redisClient && redisClient.isOpen) {
+            redisClient.quit(() => {
+                logger.info('Redis client closed');
+                process.exit(0);
+            });
+        } else {
             process.exit(0);
-        });
+        }
     });
 });
 
@@ -350,10 +397,14 @@ process.on('SIGINT', () => {
     server.close(() => {
         logger.info('HTTP server closed');
         
-        redisClient.quit(() => {
-            logger.info('Redis client closed');
+        if (redisClient && redisClient.isOpen) {
+            redisClient.quit(() => {
+                logger.info('Redis client closed');
+                process.exit(0);
+            });
+        } else {
             process.exit(0);
-        });
+        }
     });
 });
 
@@ -371,7 +422,7 @@ process.on('uncaughtException', (error) => {
 // Start server
 server.listen(port, () => {
     const protocol = (process.env.HTTPS === 'true' || process.env.NODE_ENV === 'production') ? 'https' : 'http';
-    const host = process.env.HOST || '127.0.0.1';
+    const host = process.env.HOST || '0.0.0.0';
     
     logger.info(`Server started successfully`, {
         url: `${protocol}://${host}:${port}`,

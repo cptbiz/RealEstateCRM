@@ -1,0 +1,78 @@
+{
+  "version": 2,
+  "name": "real-estate-crm-frontend",
+  "framework": "create-react-app",
+  "buildCommand": "npm run build",
+  "outputDirectory": "client/build",
+  "installCommand": "cd client && npm install --legacy-peer-deps",
+  "devCommand": "cd client && npm start",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "headers": [
+    {
+      "source": "/static/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-XSS-Protection",
+          "value": "1; mode=block"
+        }
+      ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "$REACT_APP_API_URL/$1"
+    }
+  ],
+  "redirects": [
+    {
+      "source": "/dashboard",
+      "destination": "/",
+      "permanent": false
+    }
+  ],
+  "env": {
+    "REACT_APP_API_URL": "@react_app_api_url",
+    "REACT_APP_WS_URL": "@react_app_ws_url",
+    "REACT_APP_GOOGLE_MAPS_API_KEY": "@react_app_google_maps_api_key",
+    "REACT_APP_STRIPE_PUBLISHABLE_KEY": "@react_app_stripe_publishable_key",
+    "REACT_APP_ENVIRONMENT": "production",
+    "REACT_APP_DEFAULT_LANGUAGE": "en",
+    "REACT_APP_SUPPORTED_LANGUAGES": "en,pt-BR,es,ru",
+    "REACT_APP_DEFAULT_CURRENCY": "USD",
+    "REACT_APP_SUPPORTED_CURRENCIES": "USD,BRL,EUR,RUB",
+    "REACT_APP_ENABLE_AI_FEATURES": "true",
+    "REACT_APP_ENABLE_REAL_TIME": "true",
+    "REACT_APP_ENABLE_NOTIFICATIONS": "true"
+  },
+  "build": {
+    "env": {
+      "GENERATE_SOURCEMAP": "false",
+      "DISABLE_ESLINT_PLUGIN": "true",
+      "IMAGE_INLINE_SIZE_LIMIT": "0"
+    }
+  },
+  "functions": {
+    "app/api/**/*.js": {
+      "runtime": "@vercel/node"
+    }
+  }
+}
